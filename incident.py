@@ -4,9 +4,9 @@ import requests
 from trino.auth import BasicAuthentication
 from trino.dbapi import connect
 
-#########################
-# BACKEND HELPER CODE
-#########################
+############################
+# HELPER FUNCTIONS
+############################
 
 def get_checks_df(api_key, env_name):
     """
@@ -42,46 +42,70 @@ def get_checks_df(api_key, env_name):
     df = pd.DataFrame(data, columns=["check_name", "definition", "outcome", "table_name"])
     return df
 
-def get_table_lineage(api_key, env_name, catalog, schema, table_name):
-    # Construct the fully qualified name
-    fully_qualified_name = f"{catalog}.{catalog}.{schema}.{table_name}"
+def get_schemas(api_key, catalog):
+    """
+    Returns a list of schema names for a given catalog
+    using the Workbench Meta-Info API.
+    """
+    url = f"https://unique-haddock.dataos.app/workbench/api/meta-info/presto/{catalog}?&routingName=miniature"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("schemas", [])
 
-    # Construct the URL
-    url = f"https://{env_name}/metis/api/v1/lineage/table/name/{fully_qualified_name}?upstreamDepth=2&downstreamDepth=2"
-    
+def get_tables(api_key, catalog, schema_name):
+    """
+    Returns a list of tables for a given catalog & schema.
+    """
+    url = f"https://unique-haddock.dataos.app/workbench/api/meta-info/presto/{catalog}/{schema_name}?&routingName=miniature"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("tables", [])
+
+def get_table_lineage(api_key, env_name, catalog, schema_name, table_name):
+    """
+    Calls the Metis lineage API for the given table.
+    """
+    fqn = f"{catalog}.{catalog}.{schema_name}.{table_name}"
+    url = f"https://{env_name}/metis/api/v1/lineage/table/name/{fqn}?upstreamDepth=2&downstreamDepth=2"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     response = requests.get(url, headers=headers)
     response.raise_for_status()
-    
     return response.json()
 
 def parse_downstream_lineage(lineage_json):
+    """
+    Parse lineage data into a list of {downstream_workflow_name, downstream_datasets}.
+    """
     nodes = lineage_json.get("nodes", [])
-    node_lookup = { node["id"]: node for node in nodes }
-    downstream_edges = lineage_json.get("downstreamEdges", [])
+    node_lookup = {node["id"]: node for node in nodes}
+    edges = lineage_json.get("downstreamEdges", [])
 
     results = []
-    for edge in downstream_edges:
-        from_id = edge["fromEntity"]
-        to_id   = edge["toEntity"]
+    for edge in edges:
+        from_node = node_lookup.get(edge["fromEntity"])
+        to_node = node_lookup.get(edge["toEntity"])
 
-        from_node = node_lookup.get(from_id)
-        to_node   = node_lookup.get(to_id)
-
-        workflow_name  = None
+        workflow_name = None
         downstream_tbl = None
 
-        # Identify dataosJob node (workflow)
         if from_node and from_node["type"] == "dataosJob":
-            full_wf_fqn = from_node.get("fullyQualifiedName", "")
-            parts = full_wf_fqn.split(".")
+            wf_fqn = from_node.get("fullyQualifiedName", "")
+            parts = wf_fqn.split(".")
             if len(parts) > 2:
                 workflow_name = parts[2]
-
-        # Identify downstream table node
         if to_node and to_node["type"] == "table":
             downstream_tbl = to_node.get("fullyQualifiedName", "")
 
@@ -90,7 +114,6 @@ def parse_downstream_lineage(lineage_json):
                 "downstream_workflow_name": workflow_name,
                 "downstream_datasets": downstream_tbl
             })
-
     return results
 
 def delete_workflow(api_key, workflow_name):
@@ -107,7 +130,7 @@ def delete_workflow(api_key, workflow_name):
             f"Failed to delete workflow '{workflow_name}'. "
             f"Status: {resp.status_code}, Details: {resp.text}"
         )
-
+        
 ############################
 # ALERT / NOTIFICATION FUNCTIONS
 ############################
@@ -130,228 +153,262 @@ def send_alert(teams_webhook_url: str, message: str):
     except Exception as e:
         st.error(f"Error posting to Teams: {e}")
 
-#########################
+
+############################
 # STREAMLIT APP
-#########################
+############################
 
 def main():
     st.set_page_config(page_title="incident_management", layout="wide")
 
-    # Initialize session state items if they don't exist
+    # --- Constants (hardcoded) ---
+    # These values are no longer asked from the user.
+    st.session_state["api_key"] = "c3RyZWFtYXBwLjU0N2I0NTg4LTBkZDgtNDZkMC05Y2MwLTUyNjU4NDcxOWIwNg=="
+    env_name = "unique-haddock.dataos.app"
+    catalog = "icebase"
+
+    # Initialize session_state variables if not present
+    if "workflow_names" not in st.session_state:
+        st.session_state["workflow_names"] = []
+    if "schemas" not in st.session_state:
+        st.session_state["schemas"] = []
+    if "tables" not in st.session_state:
+        st.session_state["tables"] = []
     if "downstream_workflows" not in st.session_state:
         st.session_state.downstream_workflows = pd.DataFrame()
     if "checks_df" not in st.session_state:
         st.session_state.checks_df = pd.DataFrame()
-    if "api_key" not in st.session_state:
-        st.session_state.api_key = ""
-    if "env_name" not in st.session_state:
-        st.session_state.env_name = ""
-    if "catalog" not in st.session_state:
-        st.session_state.catalog = ""
-    if "schema" not in st.session_state:
-        st.session_state.schema = ""
-    if "table_name" not in st.session_state:
-        st.session_state.table_name = ""
-    # Each rule looks like:
-    # {
-    #   "action_type": "Alert Only" or "Alert + Delete",
-    #   "check_name": ...,
-    #   "desired_outcome": "Pass" or "Fail",
-    #   "workflow_name": (optional),
-    #   "teams_webhook": ...
-    # }
+
+    # Automatically load schemas if we don't have them yet
+    if not st.session_state["schemas"]:
+        try:
+            schemas_list = get_schemas(st.session_state["api_key"], catalog)
+            st.session_state["schemas"] = schemas_list
+        except Exception as e:
+            st.error(f"Error fetching schemas: {e}")
     if "rules" not in st.session_state:
         st.session_state.rules = []
 
-    tab_home, tab_manage = st.tabs(["Home", "Manage"])
 
-    ######## HOME TAB ########
-    with tab_home:
-        st.header("Incident Management - Home")
+    st.header("Incident App")
 
-        api_key = st.text_input("API Key", type="password")
-        env_name = st.text_input("Env Name", value="unique-haddock.dataos.app")
-        catalog = st.text_input("Catalog Name", value="icebase")
-        schema = st.text_input("Schema Name", value="customer_relationship_management")
-        table_name = st.text_input("Table Name", value="crm_raw_data")
-        
-        # Button to get lineage
-        if st.button("Get Downstream Workflows"):
-            if not api_key or not catalog or not schema or not table_name:
-                st.warning("Please provide all required fields.")
-            else:
-                try:
-                    lineage_json = get_table_lineage(api_key, env_name, catalog, schema, table_name)
-                    results = parse_downstream_lineage(lineage_json)
+    catalog = st.text_input("Catalog Name", value="icebase")
+    # 1) Dropdown to select schema (auto-loaded above)
+    selected_schema = st.selectbox(
+        "Select a Schema:",
+        ["(None)"] + st.session_state["schemas"]
+    )
 
-                    if not results:
-                        st.info("No downstream workflows/datasets found.")
-                    else:
-                        # Optional search filter
-                        search_str = st.text_input("Search (workflow or dataset name)")
-                        if search_str:
-                            filtered = [
-                                r for r in results 
-                                if search_str.lower() in r["downstream_workflow_name"].lower()
-                                or search_str.lower() in r["downstream_datasets"].lower()
-                            ]
-                        else:
-                            filtered = results
+    # 2) Once a schema is selected, auto-load tables
 
-                        # Display table
-                        df = pd.DataFrame(filtered)
-                        st.dataframe(df, use_container_width=True)
+    if selected_schema and selected_schema != "(None)":
+        try:
+            tables_list = get_tables(st.session_state["api_key"], catalog, selected_schema)
+            st.session_state["tables"] = tables_list
+        except Exception as e:
+            st.error(f"Error fetching tables: {e}")
+    else:
+        st.session_state["tables"] = []
 
-                        st.write("#### Switch to the Actions tab.")
-                except Exception as e:
-                    st.error(f"Error retrieving lineage: {str(e)}")
+    # 3) Dropdown for tables
 
-        if st.button("Fetch Table's Downstream and Checks"):
-            if not api_key or not catalog or not schema or not table_name:
-                st.warning("Please provide all required fields.")
-            else:
-                try:
-                    st.session_state.api_key = api_key
-                    st.session_state.env_name = env_name
-                    st.session_state.catalog = catalog
-                    st.session_state.schema = schema
-                    st.session_state.table_name = table_name
-
-                    # Downstream Workflows
-                    lineage_json = get_table_lineage(api_key, env_name, catalog, schema, table_name)
-                    results = parse_downstream_lineage(lineage_json)
-                    wf_df = pd.DataFrame(results)
-                    st.session_state.downstream_workflows = wf_df
-
-                    # Checks for this table
-                    all_checks = get_checks_df(api_key, env_name)
-                    filtered_checks = all_checks[all_checks["table_name"] == table_name]
-                    st.session_state.checks_df = filtered_checks
-
-                    if wf_df.empty:
-                        st.info("No downstream workflows found for this table.")
-                    else:
-                        st.success("Downstream workflows fetched and stored.")
-
-                    if filtered_checks.empty:
-                        st.info("No checks found for this table.")
-                    else:
-                        st.success("Relevant checks fetched and stored.")
-                except Exception as e:
-                    st.error(f"Error fetching data: {str(e)}")
+    selected_table = st.selectbox(
+        "Select a Table:",
+        ["(None)"] + st.session_state["tables"] if st.session_state["tables"] else ["(None)"]
+    )
 
 
-    ######## MANAGE TAB ########
-    with tab_manage:
-        st.header("Manage Tab")
-
-        # Quick checks if we have data
-        if st.session_state.downstream_workflows.empty:
-            st.info("No downstream workflows found. Please fetch them in the Home tab.")
-        if st.session_state.checks_df.empty:
-            st.info("No checks found. Please fetch them in the Home tab.")
-
-        if st.session_state.checks_df.empty:
-            return  # Stop if no checks at all.
-
-        st.subheader("Add a New Rule")
-        with st.form("add_rule_form", clear_on_submit=True):
-            action_type = st.selectbox("Action Type", ["Alert Only", "Alert + Delete"])
-
-            # Let user pick a check from checks_df
-            check_options = st.session_state.checks_df["check_name"].unique().tolist()
-            selected_check = st.selectbox("Select a Check Name", check_options)
-
-            # The user chooses the outcome they'd like to trigger on
-            desired_outcome = st.selectbox("Desired Outcome to Trigger", ["pass", "fail"])
-
-            workflow_name = ""
-            if action_type == "Alert + Delete":
-                if st.session_state.downstream_workflows.empty:
-                    st.warning("No workflows available for deletion.")
-                else:
-                    wf_names = (
-                        st.session_state.downstream_workflows["downstream_workflow_name"]
-                        .unique()
-                        .tolist()
-                    )
-                    workflow_name = st.selectbox("Workflow to Delete", wf_names)
-
-            teams_webhook_url = st.text_input("Teams Webhook URL (optional)")
-
-            if st.form_submit_button("Add Rule"):
-                # Validate if needed
-                if action_type == "Alert + Delete" and not workflow_name:
-                    st.warning("Please select a workflow to delete.")
-                    st.stop()
-
-                new_rule = {
-                    "action_type": action_type,
-                    "check_name": selected_check,
-                    "desired_outcome": desired_outcome,
-                    "workflow_name": workflow_name,
-                    "teams_webhook": teams_webhook_url
-                }
-                st.session_state.rules.append(new_rule)
-                st.success("Rule added!")
-
-        st.divider()
-
-        # Show existing rules
-        st.subheader("Current Rules")
-        if not st.session_state.rules:
-            st.write("No rules defined yet.")
+    if st.button("Fetch Checks defined on this Dataset"):
+        if  not selected_schema or not selected_table:
+            st.warning("Please provide all required fields.")
         else:
-            rules_df = pd.DataFrame(st.session_state.rules)
-            st.dataframe(rules_df, use_container_width=True)
+            try:
+                st.session_state.api_key = st.session_state["api_key"],
+                st.session_state.env_name = env_name
+                st.session_state.catalog = catalog
+                st.session_state.schema = selected_schema
+                st.session_state.table_name = selected_table
 
-            # Button to "Trigger" all rules against the *current* outcomes
-            st.markdown("### Trigger the Rules Now?")
-            if st.button("Trigger All Rules"):
-                trigger_all_rules()
+                # Downstream Workflows
+                lineage_json = get_table_lineage(api_key, env_name, catalog, selected_schema, selected_table)
+                results = parse_downstream_lineage(lineage_json)
+                wf_df = pd.DataFrame(results)
+                st.session_state.downstream_workflows = wf_df
+
+                # Checks for this table
+                all_checks = get_checks_df(api_key, env_name)
+                filtered_checks = all_checks[all_checks["table_name"] == selected_table]
+                st.session_state.checks_df = filtered_checks
+
+                if wf_df.empty:
+                    st.info("No downstream workflows found for this table.")
+                else:
+                    st.success("Downstream workflows fetched and stored.")
+
+                if filtered_checks.empty:
+                    st.info("No checks found for this table.")
+                else:
+                    st.success("Relevant checks fetched and stored.")
+            except Exception as e:
+                st.error(f"Error fetching data: {str(e)}")
+    if not st.session_state.downstream_workflows.empty:
+        st.dataframe(st.session_state.downstream_workflows, use_container_width=True)
+
+
+
+    # Quick checks if we have data
+    if st.session_state.downstream_workflows.empty:
+        st.info("No downstream workflows found. Please fetch them.")
+    if st.session_state.checks_df.empty:
+        st.info("No checks found. Please fetch them.")
+
+    if st.session_state.checks_df.empty:
+        return  # Stop if no checks at all.
+    
+    st.subheader("Add a New Rule")
+    with st.form("add_rule_form", clear_on_submit=True):
+        action_type = st.selectbox("Action Type", ["Alert Only", "Alert + Pipeline Break"])
+
+        # Let user pick a check from checks_df
+        check_options = st.session_state.checks_df["check_name"].unique().tolist()
+        selected_check = st.selectbox("Select a Check Name", check_options)
+
+        # The user chooses the outcome they'd like to trigger on
+        desired_outcome = st.selectbox("Desired Check Outcome for Trigger", ["pass", "fail"])
+
+        # We set a default workflow_name to an empty string
+        workflow_name = ""
+
+        # Show the workflow dropdown ONLY if the user selected "Alert + Pipeline Break"
+        if action_type == "Alert + Pipeline Break":
+            if st.session_state.downstream_workflows.empty:
+                st.warning(
+                    "No downstream workflows have been fetched yet. "
+                    "Click 'Fetch Checks defined on this Dataset' above."
+                )
+                wf_names = []
+            else:
+                wf_names = (
+                    st.session_state.downstream_workflows["downstream_workflow_name"]
+                    .unique()
+                    .tolist()
+                )
+
+            # Now show the dropdown to pick which workflow to delete
+            workflow_name = st.selectbox("Workflow to Delete", ["(None)"] + wf_names, index=0)
+            
+            # If user leaves it on "(None)", treat it as empty
+            if workflow_name == "(None)":
+                workflow_name = ""
+
+        teams_webhook_url = st.text_input("Teams Webhook URL")
+
+        if st.form_submit_button("Add Rule"):
+            # If we are in "Pipeline Break" mode but have no actual workflow, warn the user
+            if action_type == "Alert + Pipeline Break" and not workflow_name:
+                st.warning("Please select a workflow to delete.")
+                st.stop()
+
+            new_rule = {
+                "action_type": action_type,
+                "check_name": selected_check,
+                "desired_outcome": desired_outcome,
+                "workflow_name": workflow_name,
+                "teams_webhook": teams_webhook_url
+            }
+            st.session_state.rules.append(new_rule)
+            st.success("Rule added!")
+
+    st.divider()
+
+    # Show existing rules
+    st.subheader("Current Rules")
+
+    rules_df = pd.DataFrame(st.session_state.rules)
+    st.dataframe(rules_df, use_container_width=True)
+
+    # Add Delete buttons
+    for i, rule in enumerate(st.session_state.rules):
+        # A unique key for each button to avoid collisions
+        if st.button(f"Delete Rule #{i+1}", key=f"delete_rule_{i}"):
+            # Remove that rule by index
+            st.session_state.rules.pop(i)
+            st.experimental_rerun()
+            
+# Additional UI to choose a rule to trigger
+    st.markdown("### Trigger the Rules Now?")
+
+    rule_names = [f"Rule #{i+1}: {rule['check_name']}" for i, rule in enumerate(st.session_state.rules)]
+    selected_rule_index = st.selectbox(
+        "Select a Rule to Trigger (or skip to trigger all)", 
+        options=["(None)"] + rule_names
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Trigger Selected Rule"):
+            if selected_rule_index == "(None)":
+                st.warning("Please select a rule or use 'Trigger All Rules'.")
+            else:
+                # Figure out which index was chosen
+                idx = rule_names.index(selected_rule_index)
+                selected_rule = st.session_state.rules[idx]
+                trigger_rule(selected_rule, idx+1)
+
+    with col2:
+        if st.button("Trigger All Rules"):
+            trigger_all_rules()
+
+def trigger_rule(rule, rule_index=None):
+    """
+    Trigger a single rule (alert + optional workflow deletion).
+    rule_index is optional, just for display messages.
+    """
+    checks_df = st.session_state.checks_df
+    api_key   = st.session_state.api_key
+
+    check_name      = rule["check_name"]
+    desired_outcome = rule["desired_outcome"]
+    action_type     = rule["action_type"]
+    workflow_name   = rule["workflow_name"]
+    teams_webhook   = rule["teams_webhook"]
+
+    # Find the current outcome in checks_df
+    row = checks_df[checks_df["check_name"] == check_name]
+    if row.empty:
+        st.warning(f"[Rule {rule_index}] Check '{check_name}' not found in checks_df.")
+        return
+
+    current_outcome = row["outcome"].iloc[0]
+
+    if current_outcome == desired_outcome:
+        # This rule is triggered
+        st.write(f"**[Rule {rule_index}]** TRIGGERED for check: {check_name} (current outcome={current_outcome}).")
+
+        # Alert
+        alert_msg = f"Check '{check_name}' has outcome '{current_outcome}', rule triggered."
+        send_alert(teams_webhook, alert_msg)
+
+        # If "Alert + Pipeline Break," also delete the workflow
+        if action_type == "Alert + Pipeline Break" and workflow_name:
+            success, msg = delete_workflow(api_key, workflow_name)
+            if success:
+                st.success(msg)
+            else:
+                st.error(msg)
+    else:
+        # Not triggered
+        st.write(f"[Rule {rule_index}] NOT triggered. Current outcome='{current_outcome}', desired='{desired_outcome}'.")
 
 def trigger_all_rules():
     """
     For each rule, check if the *current outcome* in checks_df 
     matches the rule's desired outcome. If yes, do the action.
     """
-    checks_df = st.session_state.checks_df
-    api_key   = st.session_state.api_key
-
     for i, rule in enumerate(st.session_state.rules, start=1):
-        check_name      = rule["check_name"]
-        desired_outcome = rule["desired_outcome"]
-        action_type     = rule["action_type"]
-        workflow_name   = rule["workflow_name"]
-        teams_webhook   = rule["teams_webhook"]
+        trigger_rule(rule, i)
 
-        # Find the current outcome in checks_df
-        row = checks_df[checks_df["check_name"] == check_name]
-        if row.empty:
-            st.warning(f"[Rule {i}] Check '{check_name}' not found in checks_df.")
-            continue
-
-        current_outcome = row["outcome"].iloc[0]
-
-        if current_outcome == desired_outcome:
-            # This rule is triggered
-            st.write(f"**[Rule {i}]** TRIGGERED for check: {check_name} (current outcome={current_outcome}).")
-
-            # Alert
-            alert_msg = f"Check '{check_name}' has outcome '{current_outcome}', rule triggered."
-            send_alert(teams_webhook, alert_msg)
-
-            # If "Alert + Delete," also delete the workflow
-            if action_type == "Alert + Delete" and workflow_name:
-                success, msg = delete_workflow(api_key, workflow_name)
-                if success:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-        else:
-            # Not triggered
-            st.write(f"[Rule {i}] NOT triggered. Current outcome='{current_outcome}', desired='{desired_outcome}'.")
-
+api_key="c3RyZWFtYXBwLjU0N2I0NTg4LTBkZDgtNDZkMC05Y2MwLTUyNjU4NDcxOWIwNg=="
 #############################
 # Run the app
 #############################
