@@ -31,12 +31,25 @@ def get_checks_df(api_key, env_name):
     )
     cur = conn.cursor()
     cur.execute("""
-        SELECT DISTINCT
-            name as check_name,
+            SELECT
+            check_name,
             definition,
             outcome,
             table_name
-        FROM "icebase"."coke_dummy".checks
+            FROM
+            (
+                SELECT
+                name AS check_name,
+                definition,
+                outcome,
+                table_name,
+                created_at,
+                row_number() over (PARTITION by name ORDER BY created_at DESC) AS rn
+                FROM
+                "icebase"."coke_dummy".checks
+            )
+            WHERE
+            rn = 1
     """)
     data = cur.fetchall()
     df = pd.DataFrame(data, columns=["check_name", "definition", "outcome", "table_name"])
