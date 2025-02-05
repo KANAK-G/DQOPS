@@ -218,7 +218,7 @@ def main():
     )
 
 
-    if st.button("Fetch Checks defined on this Dataset"):
+    if st.button("Fetch Checks and Downstream Workflows defined on this Dataset"):
         if  not selected_schema or not selected_table:
             st.warning("Please provide all required fields.")
         else:
