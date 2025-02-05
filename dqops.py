@@ -138,7 +138,7 @@ def main():
 
     # Replace these with your actual environment URL and API key
     env_name = "https://unique-haddock.dataos.app"
-    api_key = "cHl0aG9uX2FwaS41ZWNmNzZjZC04MWI5LTQ2YjktOTI0OC04NjJkZmE1YmY2NmU="
+    api_key = "c3RyZWFtYXBwLjU0N2I0NTg4LTBkZDgtNDZkMC05Y2MwLTUyNjU4NDcxOWIwNg=="
     catalog = "icebase"
 
     # 1) Load checks DataFrame
