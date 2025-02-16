@@ -2,3 +2,5 @@ streamlit
 requests
 trino
 pandas
+plotly
+psycopg2
